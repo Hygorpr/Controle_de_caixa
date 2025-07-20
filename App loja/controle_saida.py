@@ -3,9 +3,14 @@ from tkinter import messagebox, ttk, filedialog
 import sqlite3
 from datetime import datetime
 import csv
+import os
+
+backup_dir = "backups"
+os.makedirs(backup_dir, exist_ok=True)
+
 
 # Banco de dados
-conn = sqlite3.connect('Historico.db')
+conn = sqlite3.connect('controle_saida.db')
 cursor = conn.cursor()
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS saidas (
@@ -70,7 +75,8 @@ def atualizar_historico():
 
     cursor.execute(query, tuple(params))
     for r in cursor.fetchall():
-        tree.insert('', tk.END, iid=str(r[0]), values=(r[1], r[2], f"R$ {r[3]:.2f}", r[4]))
+        data_br = datetime.strptime(r[4], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M')
+        tree.insert('', tk.END, iid=str(r[0]), values=(r[1], r[2], f"R$ {r[3]:.2f}", data_br))   
 
 def exportar_csv():
     registros = tree.get_children()
@@ -95,13 +101,22 @@ def exportar_csv():
             messagebox.showerror("Erro", f"Erro ao exportar CSV:\n{e}")
 
 def mostrar_total():
-    total = 0
+    total = 0.0
     for item in tree.get_children():
-        valor = tree.item(item)['values'][2]  # 'R$ xx,xx'
-        valor_float = float(str(valor).replace('R$', '').replace(',', '').strip())
-        qtd = int(tree.item(item)['values'][1])
-        total += valor_float * qtd
-    messagebox.showinfo("Total de Vendas Filtradas", f"Total: R$ {total:.2f}")
+        valor_str = tree.item(item)['values'][2]  # Pega "R$ 21.00"
+        
+        # Remove R$, espaços e converte para float corretamente
+        valor_limpo = valor_str.replace('R$', '').strip()
+        
+        # Converte para float tratando o ponto como separador decimal
+        try:
+            total += float(valor_limpo)
+        except ValueError:
+            print(f"Erro ao converter valor: {valor_str}")
+    
+    # Formatação brasileira correta
+    total_formatado = f"R$ {total:,.2f}".replace('.', 'temp').replace(',', '.').replace('temp', ',')
+    messagebox.showinfo("Total de Vendas Filtradas", f"Total: R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
 def remover_saida():
     selected = tree.selection()
@@ -139,7 +154,7 @@ def fechar_caixa():
         messagebox.showinfo("Fechamento de Caixa", "Nenhuma venda registrada hoje.")
         return
 
-    total = sum(q * v for _, q, v, _ in registros)
+    total = sum(v for _, _, v, _ in registros)
     caminho = filedialog.asksaveasfilename(
         defaultextension=".csv",
         filetypes=[("CSV", "*.csv")],
@@ -154,9 +169,45 @@ def fechar_caixa():
                     writer.writerow(r)
                 writer.writerow([])
                 writer.writerow(["TOTAL DO DIA", "", f"R$ {total:.2f}", hoje])
-            messagebox.showinfo("Fechamento Concluído", f"Arquivo salvo e total do dia foi R$ {total:.2f}")
+            
+            # 🔥 Remove registros do dia após salvar
+            cursor.execute("DELETE FROM saidas WHERE dia = ?", (hoje,))
+            conn.commit()
+            atualizar_historico()
+            
+            messagebox.showinfo("Fechamento Concluído", f"Arquivo salvo e total do dia foi R$ {total:.2f}\nRegistros do dia removidos.")
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao salvar fechamento: {e}")
+
+def importar_fechamento():
+    caminho = filedialog.askopenfilename(
+        title="Selecione o arquivo de fechamento",
+        filetypes=[("CSV files", "*.csv")]
+    )
+    if not caminho:
+        return
+
+    try:
+        with open(caminho, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader)  # Pula cabeçalho
+            for linha in reader:
+                if not linha or linha[0].startswith("TOTAL"):  # Ignora linha total ou vazia
+                    continue
+                nome, quantidade, valor, data = linha
+                # Insere no banco de dados
+                dia = data.split(' ')[0]  # Extrai só a data
+                cursor.execute('''
+                    INSERT INTO saidas (nome, quantidade, valor, data, dia)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (nome, int(quantidade), float(valor.replace('R$', '').strip()), data, dia))
+            conn.commit()
+            atualizar_historico()
+            messagebox.showinfo("Sucesso", "Fechamento importado com sucesso!")
+    except Exception as e:
+        messagebox.showerror("Erro", f"Falha ao importar fechamento:\n{e}")
+
+
 
 app = tk.Tk()
 app.title('Controle de Saída - Loja de Aquarismo')
@@ -205,7 +256,7 @@ btn_filtrar.pack(side='left', padx=10)
 frame_historico = tk.Frame(app)
 frame_historico.pack(padx=10, pady=10, fill='both', expand=True)
 
-cols = ("Produto", "Quantidade", "Valor", "Data")
+cols = ("Produto", "Quantidade", "Valor Unitário", "Data")
 tree = ttk.Treeview(frame_historico, columns=cols, show='headings', selectmode='extended')
 for col in cols:
     tree.heading(col, text=col, command=lambda _col=col: ordenar_coluna(_col))
@@ -231,6 +282,10 @@ btn_remover.pack(side='left', padx=5)
 
 btn_fechar_caixa = tk.Button(frame_botoes, text="Fechar Caixa (Hoje)", command=fechar_caixa)
 btn_fechar_caixa.pack(side='left', padx=5)
+
+btn_importar = tk.Button(frame_botoes, text="Importar Fechamento", command=importar_fechamento)
+btn_importar.pack(side='left', padx=5)
+
 
 atualizar_historico()
 app.mainloop()
